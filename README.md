@@ -1,14 +1,23 @@
-# astrbot-plugin-helloworld
+# 脑叶公司完整EGO镇压系统 v1.1.0
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+## 新增功能
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+### 疯狂系统
+- `/陷入疯狂 员工名` - 使员工陷入疯狂状态
+- `/解除疯狂 员工名` - 手动解除疯狂状态
 
-# Supports
+### 员工互相攻击
+- `/攻击 攻击者名 目标名 次数` - 统一攻击指令，支持员工打员工
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+### 疯狂状态机制
+| 武器类型 | 对疯狂员工的效果 |
+|----------|------------------|
+| 精神 | 只扣疯狂值 |
+| 侵蚀 | 同时扣生命值和疯狂值 |
+| 物理/灵魂 | 只扣生命值 |
+
+疯狂值归零时自动解除疯狂状态，生命值归零时进入濒死。
+
+## 指令变更
+- 所有指令前缀从 `.` 改为 `/`
+- 评级使用全称：HE/WAW/ALEPH
