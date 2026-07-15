@@ -1,0 +1,32 @@
+{
+  "五谷轮回": {
+    "atk_type": "物理",
+    "level": "HE",
+    "phy": 1.0,
+    "spi": 1.0,
+    "cor": 1.0,
+    "sou": 1.0,
+    "speed": 8.0
+  },
+  "死别": {
+    "atk_type": "灵魂",
+    "level": "ALEPH",
+    "phy": 1.2,
+    "spi": 1.5,
+    "cor": 1.0,
+    "sou": 1.7,
+    "speed": 20.0
+  },
+  "不知何人": {
+    "code": "O-01-45",
+    "atk_type": "侵蚀",
+    "level": "HE",
+    "phy": 1.0,
+    "spi": 0.7,
+    "cor": 0.7,
+    "sou": 1.7,
+    "speed": 10.0,
+    "q_counter_max": 3,
+    "q_counter": 3
+  }
+}

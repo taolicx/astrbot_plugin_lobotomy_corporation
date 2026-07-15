@@ -1,0 +1,39 @@
+{
+  "玛蒂尔达": {
+    "weapon": "随便",
+    "armor": "都行",
+    "trinkets": [
+      "成功了？"
+    ],
+    "max_trinket_slot": 3,
+    "hp": -1.8000000000000007,
+    "is_dying": true,
+    "is_crazy": false,
+    "crazy_value": 0,
+    "is_dead": false
+  },
+  "西里安": {
+    "weapon": "随便",
+    "armor": "都行",
+    "trinkets": [
+      "成功了？"
+    ],
+    "max_trinket_slot": 3,
+    "hp": 7.0,
+    "is_dying": false,
+    "is_crazy": false,
+    "crazy_value": 0
+  },
+  "西里斯安": {
+    "weapon": "悔恨",
+    "armor": "都行",
+    "trinkets": [
+      "成功了？"
+    ],
+    "max_trinket_slot": 3,
+    "hp": 5.1,
+    "is_dying": false,
+    "is_crazy": false,
+    "crazy_value": 0
+  }
+}
