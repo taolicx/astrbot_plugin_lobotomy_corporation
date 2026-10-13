@@ -1,6 +1,9 @@
 import json
 import time
 import os
+import re
+import math
+import tempfile
 from pathlib import Path
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
@@ -24,6 +27,12 @@ REST_CD_EXTEND = 30 * 60
 DODGE_EXPIRE = 60 * 60
 DYING_RESCUE_EXPIRE = 60 * 60
 VALID_TRINKET_PROP = ["hp", "sp", "atk", "spd", "succ"]
+DAMAGE_TYPE_RESISTANCE = {
+    "物理": "phy", "物理伤害": "phy", "红": "phy", "红色": "phy", "勇气": "phy",
+    "精神": "spi", "精神伤害": "spi", "白": "spi", "白色": "spi",
+    "侵蚀": "cor", "侵蚀伤害": "cor", "黑": "cor",
+    "灵魂": "sou", "灵魂伤害": "sou", "蓝": "sou", "蓝色": "sou",
+}
 
 SAVE_WEAPON = "weapon_lib.json"
 SAVE_ARMOR = "armor_lib.json"
@@ -41,8 +50,14 @@ class LobFullEgoPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         plugin_dir = Path(__file__).parent
-        self.data_dir = plugin_dir / "data"
-        self.data_dir.mkdir(exist_ok=True)
+        self.legacy_data_dir = plugin_dir / "data"
+        self.default_data_dir = self.legacy_data_dir / "defaults"
+        # Keep mutable game state outside the plugin checkout so updates do not
+        # overwrite it and Git operations do not see runtime changes as edits.
+        from astrbot.api.star import StarTools
+        self.data_dir = Path(StarTools.get_data_dir(
+            "astrbot_plugin_lobotomy_corporation"))
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.weapon_lib = self._load(SAVE_WEAPON)
         self.armor_lib = self._load(SAVE_ARMOR)
@@ -59,18 +74,52 @@ class LobFullEgoPlugin(Star):
         logger.info(f"已加载员工: {list(self.staff_data.keys())}")
 
     def _path(self, filename):
-        return str(self.data_dir / filename)
+        return self.data_dir / filename
 
     def _load(self, filename):
-        try:
-            with open(self._path(filename), "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+        target_path = self._path(filename)
+        if target_path.exists():
+            source_path = target_path
+        else:
+            # Upgrade existing installations by migrating their old data/ files.
+            legacy_path = self.legacy_data_dir / filename
+            default_path = self.default_data_dir / filename
+            source_path = (legacy_path if legacy_path.is_file()
+                           else default_path if default_path.is_file()
+                           else None)
+
+        if source_path is None:
+            data = {}
+        else:
+            try:
+                with source_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"无法读取插件数据文件 {source_path}: {exc}") from exc
+            if not isinstance(data, dict):
+                raise RuntimeError(f"插件数据文件必须是 JSON 对象：{source_path}")
+
+        # Persist defaults and migrated data into AstrBot's plugin data directory.
+        if source_path != target_path:
+            self._save(filename, data)
+        return data
 
     def _save(self, filename, data):
-        with open(self._path(filename), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        target_path = self._path(filename)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", dir=self.data_dir,
+                    prefix=f".{filename}.", suffix=".tmp", delete=False) as f:
+                temp_path = Path(f.name)
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, target_path)
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
 
     def _save_all(self):
         self._save(SAVE_WEAPON, self.weapon_lib)
@@ -84,11 +133,32 @@ class LobFullEgoPlugin(Star):
         self._save(SAVE_DYING_QUEUE, self.dying_queue)
         self._save(SAVE_MONSTER_RAID, self.raid_status)
 
+    def _contain_monster(self, monster_name):
+        raid_info = self.raid_status.setdefault(monster_name, {})
+        raid_info["is_raid"] = False
+        raid_info["hp"] = 0
+
+        monster = self.monster_lib.get(monster_name, {})
+        if "q_counter_max" in monster:
+            monster["q_counter"] = monster["q_counter_max"]
+
+        target_suffix = f"_{monster_name}"
+        for key in list(self.cd_data):
+            if key.endswith(target_suffix):
+                del self.cd_data[key]
+        for key in list(self.attack_stack):
+            if key.endswith(target_suffix):
+                del self.attack_stack[key]
+        for staff_name, dodge_data in list(self.dodge_queue.items()):
+            if dodge_data.get("source_monster") == monster_name:
+                del self.dodge_queue[staff_name]
+
     def _get_staff_max_hp(self, staff):
-        if staff["armor"] == "无":
+        armor_name = staff.get("armor", "无")
+        if armor_name == "无":
             return ARMOR_HP_BASE["HE"]
-        elif staff["armor"] in self.armor_lib:
-            armor_lv = self.armor_lib[staff["armor"]]["level"]
+        elif armor_name in self.armor_lib:
+            armor_lv = self.armor_lib[armor_name]["level"]
             base_hp = ARMOR_HP_BASE.get(armor_lv, 6.0)
         else:
             base_hp = 6.0
@@ -101,10 +171,147 @@ class LobFullEgoPlugin(Star):
     def _calculate_single_damage(self, weapon, target_resistances, level_diff, atk_mod, bonus):
         """计算单次伤害，最低0.1"""
         dmg_type = weapon["dmg_type"]
-        dmg_map = {"物理": "phy", "精神": "spi", "侵蚀": "cor", "灵魂": "sou"}
-        base_res = target_resistances.get(dmg_map.get(dmg_type, "phy"), 1.0)
+        resistance_key = DAMAGE_TYPE_RESISTANCE.get(dmg_type)
+        if resistance_key is None:
+            raise ValueError(f"不支持的伤害类型：{dmg_type}")
+        base_res = target_resistances.get(resistance_key, 1.0)
         raw_damage = base_res + level_diff * 0.2 + atk_mod + bonus
         return max(0.1, raw_damage)
+
+    def _parse_attack_request(self, raw, command_name):
+        """解析“攻击者 对 目标 进行 Y次攻击，此攻击加成为 X”格式。"""
+        prefix = f".{command_name}"
+        content = raw[len(prefix):].strip() if raw.startswith(prefix) else raw
+        pattern = r'(.+?)\s*对\s*(.+?)\s*进行\s*(\d+)\s*次攻击\s*，\s*此攻击加成为\s*([\-0-9.]+)'
+        match = re.fullmatch(pattern, content)
+        if not match:
+            return None
+
+        try:
+            attack_count = int(match.group(3))
+            bonus = float(match.group(4))
+        except ValueError:
+            return None
+
+        return (
+            match.group(1).strip(),
+            match.group(2).strip(),
+            attack_count,
+            bonus
+        )
+
+    def _resolve_staff_attack(self, attacker_name, target_name, attack_count,
+                              bonus, require_crazy):
+        """结算员工对员工的攻击，返回（提示文本，数据是否发生变化）。"""
+        if attack_count <= 0:
+            return "攻击次数必须大于0", False
+
+        if attacker_name not in self.staff_data:
+            return (f"攻击者【{attacker_name}】不存在\n"
+                    f"已注册员工：{list(self.staff_data.keys())}"), False
+
+        if target_name not in self.staff_data:
+            return (f"目标【{target_name}】不是员工\n"
+                    f"已注册员工：{list(self.staff_data.keys())}"), False
+
+        if attacker_name == target_name:
+            return "攻击者和目标不能是同一名员工", False
+
+        attacker = self.staff_data[attacker_name]
+        target = self.staff_data[target_name]
+
+        if attacker.get("is_dead", False):
+            return f"【{attacker_name}】已经死亡，无法进行任何操作", False
+
+        if target.get("is_dead", False):
+            return f"【{target_name}】已经死亡，无法继续受伤", False
+
+        if attacker.get("is_dying", False):
+            return f"【{attacker_name}】处于濒死状态，无法攻击", False
+
+        if target.get("is_dying", False):
+            return f"【{target_name}】已濒死，无法继续受伤", False
+
+        if require_crazy and not attacker.get("is_crazy", False) \
+                and not target.get("is_crazy", False):
+            return ("无法攻击！攻击双方都处于正常状态。\n"
+                    "只有疯狂员工才能参与该战斗。\n"
+                    "如需正常员工互殴，请使用 .员工互殴"), False
+
+        if attacker.get("weapon", "无") == "无":
+            return f"【{attacker_name}】未装备武器", False
+
+        if attacker["weapon"] not in self.weapon_lib:
+            return f"武器【{attacker['weapon']}】数据不存在", False
+
+        weapon = self.weapon_lib[attacker["weapon"]]
+        dmg_type = weapon.get("dmg_type")
+        resistance_key = DAMAGE_TYPE_RESISTANCE.get(dmg_type)
+        if resistance_key is None:
+            return f"武器【{attacker['weapon']}】的伤害类型【{dmg_type}】不受支持", False
+
+        if target.get("armor", "无") != "无" \
+                and target["armor"] in self.armor_lib:
+            armor = self.armor_lib[target["armor"]]
+            resistances = {
+                "phy": armor["phy"], "spi": armor["spi"],
+                "cor": armor["cor"], "sou": armor["sou"]
+            }
+        else:
+            resistances = {"phy": 1.0, "spi": 1.0,
+                           "cor": 1.0, "sou": 1.0}
+
+        atk_mod = 0
+        for trinket_name in attacker.get("trinkets", []):
+            trinket = self.trinket_lib.get(trinket_name)
+            if trinket and trinket.get("prop") == "atk":
+                atk_mod += trinket.get("val", 0) * 0.1
+
+        base_res = resistances.get(resistance_key, 1.0)
+        single_damage = max(0.1, base_res + atk_mod + bonus)
+        total_damage = single_damage * attack_count
+        target_is_crazy = target.get("is_crazy", False)
+
+        if target_is_crazy and dmg_type == "精神":
+            target["crazy_value"] = max(
+                0, target.get("crazy_value", 0) - total_damage)
+            msg = (f"{attacker_name} 使用精神武器攻击疯狂状态的 {target_name}，"
+                   f"扣除 {round(total_damage, 2)} 疯狂值")
+            if target["crazy_value"] <= 0:
+                target["is_crazy"] = False
+                target["crazy_value"] = 0
+                msg += f"\n✅【{target_name}】的疯狂值归零，已解除疯狂状态"
+            return msg, True
+
+        if target_is_crazy and dmg_type == "侵蚀":
+            half_damage = total_damage / 2
+            target["crazy_value"] = max(
+                0, target.get("crazy_value", 0) - half_damage)
+            target["hp"] = max(0, target.get("hp", 0) - half_damage)
+            msg = (f"{attacker_name} 使用侵蚀武器攻击疯狂状态的 {target_name}，"
+                   f"扣除 {round(half_damage, 2)} 生命和 "
+                   f"{round(half_damage, 2)} 疯狂值")
+            if target["crazy_value"] <= 0:
+                target["is_crazy"] = False
+                target["crazy_value"] = 0
+                msg += f"\n✅【{target_name}】的疯狂值归零，已解除疯狂状态"
+        else:
+            target["hp"] = max(0, target.get("hp", 0) - total_damage)
+            state_text = "疯狂员工" if target_is_crazy else "员工"
+            msg = (f"{attacker_name} 攻击{state_text} {target_name}，"
+                   f"造成 {round(total_damage, 2)} 生命伤害")
+
+        if target["hp"] <= 0:
+            target["hp"] = 0
+            target["is_dying"] = True
+            target["is_crazy"] = False
+            target["crazy_value"] = 0
+            self.dying_queue[target_name] = {
+                "expire": time.time() + DYING_RESCUE_EXPIRE
+            }
+            msg += f"\n💀【{target_name}】生命值归零，陷入濒死状态"
+
+        return msg, True
 
     # ==================== 测试指令 ====================
     @filter.command(".test")
@@ -115,11 +322,14 @@ class LobFullEgoPlugin(Star):
     @filter.command(".addweapon")
     async def cmd_add_weapon(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 5:
+        if len(args) != 5:
             yield event.plain_result("格式：.addweapon 武器名 伤害类型 射速 评级\n例：.addweapon 随便 精神 快 HE\n射速：极快/快/一般/慢/极慢\n评级：HE/WAW/ALEPH")
             return
         _, name, dmg_type, speed, lv = args
         lv = lv.strip().upper()
+        if dmg_type not in DAMAGE_TYPE_RESISTANCE:
+            yield event.plain_result(f"伤害类型可选：{list(DAMAGE_TYPE_RESISTANCE.keys())}")
+            return
         if name in self.weapon_lib:
             yield event.plain_result(f"武器【{name}】已存在")
             return
@@ -147,11 +357,17 @@ class LobFullEgoPlugin(Star):
     @filter.command(".delweapon")
     async def cmd_del_weapon(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 2:
+        if len(args) != 2:
             yield event.plain_result("格式：.delweapon 武器名")
             return
         _, n = args
         if n in self.weapon_lib:
+            equipped_by = [name for name, staff in self.staff_data.items()
+                           if staff.get("weapon") == n]
+            if equipped_by:
+                yield event.plain_result(
+                    f"武器【{n}】仍被员工装备：{equipped_by}，请先为员工更换武器")
+                return
             del self.weapon_lib[n]
             self._save_all()
             yield event.plain_result(f"已删除武器【{n}】")
@@ -162,7 +378,7 @@ class LobFullEgoPlugin(Star):
     @filter.command(".addarmor")
     async def cmd_add_armor(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 7:
+        if len(args) != 7:
             yield event.plain_result("格式：.addarmor 护甲名 物理 精神 侵蚀 灵魂 评级\n例：.addarmor 都行 1.0 0.5 0.7 1.7 HE")
             return
         _, name, phy, spi, cor, sou, lv = args
@@ -172,8 +388,11 @@ class LobFullEgoPlugin(Star):
             return
         try:
             phy, spi, cor, sou = float(phy), float(spi), float(cor), float(sou)
-        except:
+        except ValueError:
             yield event.plain_result("抗性必须是数字")
+            return
+        if not all(math.isfinite(value) for value in (phy, spi, cor, sou)):
+            yield event.plain_result("抗性必须是有限数字")
             return
         if lv not in LEVEL_WEIGHT:
             yield event.plain_result(f"评级可选：{list(LEVEL_WEIGHT.keys())}")
@@ -196,11 +415,17 @@ class LobFullEgoPlugin(Star):
     @filter.command(".delarmor")
     async def cmd_del_armor(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 2:
+        if len(args) != 2:
             yield event.plain_result("格式：.delarmor 护甲名")
             return
         _, n = args
         if n in self.armor_lib:
+            equipped_by = [name for name, staff in self.staff_data.items()
+                           if staff.get("armor") == n]
+            if equipped_by:
+                yield event.plain_result(
+                    f"护甲【{n}】仍被员工装备：{equipped_by}，请先为员工更换护甲")
+                return
             del self.armor_lib[n]
             self._save_all()
             yield event.plain_result(f"已删除护甲【{n}】")
@@ -211,7 +436,7 @@ class LobFullEgoPlugin(Star):
     @filter.command(".addtrinket")
     async def cmd_add_trinket(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 4:
+        if len(args) != 4:
             yield event.plain_result("格式：.addtrinket 饰品名 属性 数值\n属性：hp/sp/atk/spd/succ")
             return
         _, name, prop, val = args
@@ -223,8 +448,11 @@ class LobFullEgoPlugin(Star):
             return
         try:
             val = float(val)
-        except:
+        except ValueError:
             yield event.plain_result("数值必须是数字")
+            return
+        if not math.isfinite(val):
+            yield event.plain_result("数值必须是有限数字")
             return
         self.trinket_lib[name] = {"prop": prop, "val": val}
         self._save_all()
@@ -243,7 +471,7 @@ class LobFullEgoPlugin(Star):
     @filter.command(".deltrinket")
     async def cmd_del_trinket(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 2:
+        if len(args) != 2:
             yield event.plain_result("格式：.deltrinket 饰品名")
             return
         _, n = args
@@ -259,13 +487,16 @@ class LobFullEgoPlugin(Star):
     async def cmd_add_monster(self, event: AstrMessageEvent):
         """录入异想体：.addmonster 名称 编号 伤害类型 评级 物理 精神 侵蚀 灵魂 移速 计数器极值"""
         args = event.message_str.strip().split()
-        if len(args) < 10:
+        if len(args) != 11:
             yield event.plain_result("格式：.addmonster 名称 编号 伤害类型 评级 物理 精神 侵蚀 灵魂 移速 计数器极值\n例：.addmonster 西里安 O-01-45 侵蚀 HE 1.0 0.7 0.7 1.7 10 3")
             return
 
         _, name, code, dmg_t, lv, phy, spi, cor, sou, spd, q_max = args[:11]
 
         lv = lv.strip().upper()
+        if dmg_t not in DAMAGE_TYPE_RESISTANCE:
+            yield event.plain_result(f"伤害类型可选：{list(DAMAGE_TYPE_RESISTANCE.keys())}")
+            return
         if name in self.monster_lib:
             yield event.plain_result(f"异想体【{name}】已存在")
             return
@@ -273,11 +504,17 @@ class LobFullEgoPlugin(Star):
             phy, spi, cor, sou, spd = float(phy), float(
                 spi), float(cor), float(sou), float(spd)
             q_max = int(q_max)
-        except:
+        except ValueError:
             yield event.plain_result("抗性、移速必须是数字，计数器必须是整数")
+            return
+        if not all(math.isfinite(value) for value in (phy, spi, cor, sou, spd)):
+            yield event.plain_result("抗性、移速必须是有限数字")
             return
         if lv not in LEVEL_WEIGHT:
             yield event.plain_result(f"评级可选：{list(LEVEL_WEIGHT.keys())}")
+            return
+        if q_max <= 0:
+            yield event.plain_result("计数器极值必须大于0")
             return
 
         self.monster_lib[name] = {
@@ -304,7 +541,7 @@ class LobFullEgoPlugin(Star):
     @filter.command(".delmonster")
     async def cmd_del_monster(self, event: AstrMessageEvent):
         args = event.message_str.strip().split()
-        if len(args) < 2:
+        if len(args) != 2:
             yield event.plain_result("格式：.delmonster 异想体名")
             return
         _, n = args
@@ -325,11 +562,39 @@ class LobFullEgoPlugin(Star):
         if m_name not in self.monster_lib:
             yield event.plain_result(f"异想体【{m_name}】不存在")
             return
+        current_raid = self.raid_status.get(m_name, {})
+        if current_raid.get("is_raid", False):
+            yield event.plain_result(
+                f"【{m_name}】已经出逃，当前生命值：{round(current_raid.get('hp', 0), 2)}")
+            return
         m_info = self.monster_lib[m_name]
         self.raid_status[m_name] = {"is_raid": True,
                                     "hp": MONSTER_HP_BASE[m_info["level"]]}
         self._save_all()
         yield event.plain_result(f"⚠️【{m_name}】突破收容出逃！生命值：{MONSTER_HP_BASE[m_info['level']]}")
+
+    @filter.command(".镇压")
+    async def cmd_suppress(self, event: AstrMessageEvent):
+        """立即镇压指定的出逃异想体。"""
+        args = event.message_str.strip().split()
+        if len(args) != 2:
+            yield event.plain_result("格式：.镇压 异想体名")
+            return
+
+        monster_name = args[1]
+        if monster_name not in self.monster_lib:
+            yield event.plain_result(f"异想体【{monster_name}】不存在")
+            return
+
+        raid_info = self.raid_status.get(monster_name, {})
+        if not raid_info.get("is_raid", False):
+            yield event.plain_result(f"【{monster_name}】当前处于收容状态，无需镇压")
+            return
+
+        self._contain_monster(monster_name)
+
+        self._save_all()
+        yield event.plain_result(f"✅【{monster_name}】已被立即镇压并重新收容")
 
     # ==================== 员工管理 ====================
     @filter.command(".regstaff")
@@ -381,19 +646,23 @@ class LobFullEgoPlugin(Star):
             return
 
         s = self.staff_data[s_name]
-        arm = self.armor_lib[s["armor"]] if s["armor"] != "无" else {
+        armor_name = s.get("armor", "无")
+        weapon_name = s.get("weapon", "无")
+        arm = self.armor_lib.get(armor_name, {
             "phy": 1.0, "spi": 1.0, "cor": 1.0, "sou": 1.0, "level": "HE"}
+        )
         max_hp = self._get_staff_max_hp(s)
 
         # 计算移速
         spd_add = 0
-        for t_name in s["trinkets"]:
+        trinkets = s.get("trinkets", [])
+        for t_name in trinkets:
             if t_name in self.trinket_lib and self.trinket_lib[t_name]["prop"] == "spd":
                 spd_add += self.trinket_lib[t_name]["val"]
         staff_spd = 4 + (100 + spd_add) * 0.04
 
-        weapon_info = self.weapon_lib[s["weapon"]] if s["weapon"] != "无" else {
-            "dmg_type": "无", "speed": "无"}
+        weapon_info = self.weapon_lib.get(weapon_name, {
+            "dmg_type": "无", "speed": "无"})
 
         # 获取武器CD时间
         weapon_speed = weapon_info.get("speed", "一般")
@@ -427,18 +696,18 @@ class LobFullEgoPlugin(Star):
 
         msg = (
             f"=====员工【{s_name}】状态=====\n"
-            f"剩余生命值：{round(s['hp'], 2)} / {round(max_hp, 2)}\n"
+            f"剩余生命值：{round(s.get('hp', 0), 2)} / {round(max_hp, 2)}\n"
             f"疯狂状态：{'是' if s.get('is_crazy') else '否'}"
         )
         if s.get('is_crazy'):
             msg += f"\n疯狂值：{round(s.get('crazy_value', 0), 2)} / {round(max_hp, 2)}"
         msg += (
-            f"\n装备武器：{s['weapon']} | 伤害:{weapon_info['dmg_type']} | 射速:{weapon_speed}（CD:{round(cd_seconds/60, 0)}分钟）\n"
-            f"装备护甲：{s['armor']}\n"
+            f"\n装备武器：{weapon_name} | 伤害:{weapon_info['dmg_type']} | 射速:{weapon_speed}（CD:{round(cd_seconds/60, 0)}分钟）\n"
+            f"装备护甲：{armor_name}\n"
             f"四抗性：物理:{arm['phy']} 精神:{arm['spi']} 侵蚀:{arm['cor']} 灵魂:{arm['sou']}\n"
             f"移速数值：{round(staff_spd, 2)}\n"
-            f"携带饰品：{s['trinkets']}（槽位上限{s['max_trinket_slot']}）\n"
-            f"濒死状态：{s['is_dying']}"
+            f"携带饰品：{trinkets}（槽位上限{s.get('max_trinket_slot', DEFAULT_TRINKET_SLOT)}）\n"
+            f"濒死状态：{s.get('is_dying', False)}"
         )
 
         if stored_list:
@@ -467,6 +736,43 @@ class LobFullEgoPlugin(Star):
         self._save_all()
         yield event.plain_result(f"【{s_name}】饰品槽变更为：{self.staff_data[s_name]['max_trinket_slot']}")
 
+    @filter.command(".彻底杀死")
+    async def cmd_kill_staff(self, event: AstrMessageEvent):
+        """立即将指定员工标记为永久死亡。"""
+        args = event.message_str.strip().split()
+        if len(args) != 2:
+            yield event.plain_result("格式：.彻底杀死 员工名")
+            return
+
+        staff_name = args[1]
+        if staff_name not in self.staff_data:
+            yield event.plain_result(f"员工【{staff_name}】不存在")
+            return
+
+        staff = self.staff_data[staff_name]
+        if staff.get("is_dead", False):
+            yield event.plain_result(f"【{staff_name}】已经永久死亡")
+            return
+
+        staff["hp"] = 0
+        staff["is_dying"] = True
+        staff["is_dead"] = True
+        staff["is_crazy"] = False
+        staff["crazy_value"] = 0
+
+        self.dying_queue.pop(staff_name, None)
+        self.dodge_queue.pop(staff_name, None)
+        attacker_prefix = f"{staff_name}_"
+        for key in list(self.cd_data):
+            if key.startswith(attacker_prefix):
+                del self.cd_data[key]
+        for key in list(self.attack_stack):
+            if key.startswith(attacker_prefix):
+                del self.attack_stack[key]
+
+        self._save_all()
+        yield event.plain_result(f"💀【{staff_name}】已被彻底杀死，无法再被救援")
+
     # ==================== 疯狂系统 ====================
     @filter.command(".陷入疯狂")
     async def cmd_go_crazy(self, event: AstrMessageEvent):
@@ -483,7 +789,7 @@ class LobFullEgoPlugin(Star):
             yield event.plain_result(f"【{s_name}】濒死，无法疯狂")
             return
         if staff.get("is_dead", False):
-            yield event.plain_result(f"【{staff_name}】已经死亡，无法进行任何操作")
+            yield event.plain_result(f"【{s_name}】已经死亡，无法进行任何操作")
             return
         if staff.get("is_crazy"):
             yield event.plain_result(f"【{s_name}】已处于疯狂状态")
@@ -526,7 +832,7 @@ class LobFullEgoPlugin(Star):
             return
         staff = self.staff_data[s_name]
         if staff.get("is_dead", False):
-            yield event.plain_result(f"【{staff_name}】已经死亡，无法进行任何操作")
+            yield event.plain_result(f"【{s_name}】已经死亡，无法进行任何操作")
             return
         if staff["is_dying"]:
             yield event.plain_result("濒死无法休息")
@@ -604,6 +910,11 @@ class LobFullEgoPlugin(Star):
             return
 
         weapon = self.weapon_lib[staff["weapon"]]
+        dmg_type = weapon.get("dmg_type")
+        if dmg_type not in DAMAGE_TYPE_RESISTANCE:
+            yield event.plain_result(
+                f"武器【{staff['weapon']}】的伤害类型【{dmg_type}】不受支持")
+            return
         monster = self.monster_lib[target_name]
 
         # 计算单次伤害
@@ -652,11 +963,12 @@ class LobFullEgoPlugin(Star):
             if stack_key not in self.attack_stack:
                 self.attack_stack[stack_key] = 0
             self.attack_stack[stack_key] += attack_count
-            msg = f"{staff_name} 的武器处于冷却中（剩余 {round(remaining_cd/60, 1)} 分钟），{attack_count} 次攻击已存入堆栈，冷却结束后将自动释放。"
+            msg = (f"{staff_name} 的武器处于冷却中（剩余 {round(remaining_cd/60, 1)} 分钟），"
+                   f"{attack_count} 次攻击已存入堆栈；冷却结束后，下次攻击该目标时一并结算。")
 
         # 检查异想体是否死亡
         if self.raid_status[target_name]["hp"] <= 0:
-            self.raid_status[target_name]["is_raid"] = False
+            self._contain_monster(target_name)
             msg += f"\n✅【{target_name}】血量归零，已被镇压！"
 
         self._save_all()
@@ -669,145 +981,29 @@ class LobFullEgoPlugin(Star):
         规则：只要攻击者或目标中有一方是疯狂员工，就可以攻击
         """
         raw = event.message_str.strip()
-        if raw.startswith(".攻击疯狂 "):
-            content = raw[5:].strip()
-        else:
-            content = raw
-
-        import re
-        pattern = r'(.+?)\s*对\s*(.+?)\s*进行\s*(\d+)\s*次攻击\s*，\s*此攻击加成为\s*([\-0-9.]+)'
-        match = re.search(pattern, content)
-
-        if not match:
+        request = self._parse_attack_request(raw, "攻击疯狂")
+        if request is None:
             yield event.plain_result("格式错误！\n正确格式：.攻击疯狂 攻击者名 对 目标名 进行 Y次攻击，此攻击加成为 X\n例：.攻击疯狂 玛蒂尔达 对 张三 进行 3次攻击，此攻击加成为 0.2\n规则：只要一方是疯狂状态即可攻击")
             return
 
-        attacker_name = match.group(1).strip()
-        target_name = match.group(2).strip()
-        try:
-            attack_count = int(match.group(3))
-            bonus = float(match.group(4))
-        except:
-            yield event.plain_result("攻击次数必须是数字，加成必须是数字")
+        msg, changed = self._resolve_staff_attack(*request, require_crazy=True)
+        if changed:
+            self._save_all()
+        yield event.plain_result(msg)
+
+    # ==================== 员工互殴 ====================
+    @filter.command(".员工互殴")
+    async def cmd_staff_fight(self, event: AstrMessageEvent):
+        """员工互殴，不要求任何一方处于疯狂状态。"""
+        raw = event.message_str.strip()
+        request = self._parse_attack_request(raw, "员工互殴")
+        if request is None:
+            yield event.plain_result("格式错误！\n正确格式：.员工互殴 攻击者名 对 目标名 进行 Y次攻击，此攻击加成为 X\n例：.员工互殴 玛蒂尔达 对 张三 进行 3次攻击，此攻击加成为 0.2")
             return
 
-        if attack_count <= 0:
-            yield event.plain_result("攻击次数必须大于0")
-            return
-
-        # 验证攻击者
-        if attacker_name not in self.staff_data:
-            yield event.plain_result(f"攻击者【{attacker_name}】不存在\n已注册员工：{list(self.staff_data.keys())}")
-            return
-
-        # 验证目标必须是员工
-        if target_name not in self.staff_data:
-            yield event.plain_result(f"目标【{target_name}】不是员工\n已注册员工：{list(self.staff_data.keys())}")
-            return
-
-        attacker = self.staff_data[attacker_name]
-        target = self.staff_data[target_name]
-
-        # 新规则：只要有一方是疯狂员工，就可以攻击
-        if not attacker.get("is_crazy", False) and not target.get("is_crazy", False):
-            yield event.plain_result("无法攻击！攻击双方都处于正常状态。\n只有疯狂员工才能参与战斗。\n请先使用 .陷入疯狂 让其中一方陷入疯狂")
-            return
-
-        if attacker["is_dying"]:
-            yield event.plain_result(f"【{attacker_name}】处于濒死状态，无法攻击")
-            return
-
-        if staff.get("is_dead", False):
-            yield event.plain_result(f"【{staff_name}】已经死亡，无法进行任何操作")
-            return
-
-        if target["is_dying"]:
-            yield event.plain_result(f"【{target_name}】已濒死，无法继续受伤")
-            return
-
-        if attacker["weapon"] == "无":
-            yield event.plain_result(f"【{attacker_name}】未装备武器")
-            return
-
-        if attacker["weapon"] not in self.weapon_lib:
-            yield event.plain_result(f"武器【{attacker['weapon']}】数据不存在")
-            return
-
-        weapon = self.weapon_lib[attacker["weapon"]]
-
-        # 获取目标护甲抗性
-        if target["armor"] != "无" and target["armor"] in self.armor_lib:
-            arm = self.armor_lib[target["armor"]]
-            resistances = {
-                "phy": arm["phy"], "spi": arm["spi"], "cor": arm["cor"], "sou": arm["sou"]}
-        else:
-            resistances = {"phy": 1.0, "spi": 1.0, "cor": 1.0, "sou": 1.0}
-
-        # 计算攻击加成
-        atk_mod = 0
-        for t in attacker["trinkets"]:
-            if t in self.trinket_lib and self.trinket_lib[t]["prop"] == "atk":
-                atk_mod += self.trinket_lib[t]["val"] * 0.1
-
-        dmg_type = weapon["dmg_type"]
-        dmg_map = {"物理": "phy", "精神": "spi", "侵蚀": "cor", "灵魂": "sou"}
-        base_res = resistances.get(dmg_map.get(dmg_type, "phy"), 1.0)
-
-        # 员工之间没有等级修正
-        single_damage = max(0.1, base_res + atk_mod + bonus)
-        total_damage = single_damage * attack_count
-
-        is_target_crazy = target.get("is_crazy", False)
-        msg = ""
-
-        if is_target_crazy:
-            # 目标疯狂
-            if dmg_type == "精神":
-                target["crazy_value"] = max(
-                    0, target["crazy_value"] - total_damage)
-                msg = f"{attacker_name} 使用精神武器攻击疯狂状态的 {target_name}，扣除 {round(total_damage, 2)} 疯狂值"
-                if target["crazy_value"] <= 0:
-                    target["is_crazy"] = False
-                    target["crazy_value"] = 0
-                    msg += f"\n✅【{target_name}】的疯狂值归零，已解除疯狂状态"
-            elif dmg_type == "侵蚀":
-                half = total_damage / 2
-                target["crazy_value"] = max(0, target["crazy_value"] - half)
-                target["hp"] = max(0, target["hp"] - half)
-                msg = f"{attacker_name} 使用侵蚀武器攻击疯狂状态的 {target_name}，扣除 {round(half, 2)} 生命和 {round(half, 2)} 疯狂值"
-                if target["crazy_value"] <= 0:
-                    target["is_crazy"] = False
-                    target["crazy_value"] = 0
-                    msg += f"\n✅【{target_name}】的疯狂值归零，已解除疯狂状态"
-                if target["hp"] <= 0:
-                    target["is_dying"] = True
-                    target["is_crazy"] = False
-                    now = time.time()
-                    self.dying_queue[target_name] = {
-                        "expire": now + DYING_RESCUE_EXPIRE}
-                    msg += f"\n💀【{target_name}】生命值归零，陷入濒死状态"
-            else:
-                target["hp"] = max(0, target["hp"] - total_damage)
-                msg = f"{attacker_name} 攻击疯狂状态的 {target_name}，造成 {round(total_damage, 2)} 生命伤害"
-                if target["hp"] <= 0:
-                    target["is_dying"] = True
-                    target["is_crazy"] = False
-                    now = time.time()
-                    self.dying_queue[target_name] = {
-                        "expire": now + DYING_RESCUE_EXPIRE}
-                    msg += f"\n💀【{target_name}】生命值归零，陷入濒死状态"
-        else:
-            # 目标正常，攻击者疯狂
-            target["hp"] = max(0, target["hp"] - total_damage)
-            msg = f"{attacker_name}（疯狂）攻击正常员工 {target_name}，造成 {round(total_damage, 2)} 生命伤害"
-            if target["hp"] <= 0:
-                target["is_dying"] = True
-                now = time.time()
-                self.dying_queue[target_name] = {
-                    "expire": now + DYING_RESCUE_EXPIRE}
-                msg += f"\n💀【{target_name}】生命值归零，陷入濒死状态"
-
-        self._save_all()
+        msg, changed = self._resolve_staff_attack(*request, require_crazy=False)
+        if changed:
+            self._save_all()
         yield event.plain_result(msg)
 
     # ==================== 核心：异想体攻击指令 ====================
@@ -859,7 +1055,7 @@ class LobFullEgoPlugin(Star):
             return
 
         staff = self.staff_data[staff_name]
-        if staff["is_dying"]:
+        if staff.get("is_dying", False) or staff.get("is_dead", False):
             yield event.plain_result(f"【{staff_name}】已濒死，无法继续受伤")
             return
 
@@ -875,8 +1071,12 @@ class LobFullEgoPlugin(Star):
 
         # 计算单次伤害
         dmg_type = monster["atk_type"]
-        dmg_map = {"物理": "phy", "精神": "spi", "侵蚀": "cor", "灵魂": "sou"}
-        base_res = resistances.get(dmg_map.get(dmg_type, "phy"), 1.0)
+        resistance_key = DAMAGE_TYPE_RESISTANCE.get(dmg_type)
+        if resistance_key is None:
+            yield event.plain_result(
+                f"异想体【{monster_name}】的伤害类型【{dmg_type}】不受支持")
+            return
+        base_res = resistances.get(resistance_key, 1.0)
         single_damage = max(0.1, base_res + bonus)
         total_damage = single_damage * attack_count
 
@@ -907,8 +1107,10 @@ class LobFullEgoPlugin(Star):
         msg = f"{monster_name} 攻击 {staff_name}，造成 {round(total_damage, 2)} 点伤害！"
 
         if staff["hp"] <= 0:
+            staff["hp"] = 0
             staff["is_dying"] = True
             staff["is_crazy"] = False
+            staff["crazy_value"] = 0
             self.dying_queue[staff_name] = {
                 "expire": now + DYING_RESCUE_EXPIRE}
             msg += f"\n💀【{staff_name}】生命值归零，陷入濒死状态！1小时内可救援"
@@ -955,6 +1157,10 @@ class LobFullEgoPlugin(Star):
             yield event.plain_result("攻击次数必须大于0")
             return
 
+        if attacker_name == target_name:
+            yield event.plain_result("攻击者和目标不能是同一个异想体")
+            return
+
         # 验证攻击者异想体
         if attacker_name not in self.monster_lib:
             yield event.plain_result(f"异想体【{attacker_name}】不存在\n已录入异想体：{list(self.monster_lib.keys())}")
@@ -982,8 +1188,12 @@ class LobFullEgoPlugin(Star):
 
         # 获取目标抗性
         dmg_type = attacker["atk_type"]
-        dmg_map = {"物理": "phy", "精神": "spi", "侵蚀": "cor", "灵魂": "sou"}
-        base_res = target.get(dmg_map.get(dmg_type, "phy"), 1.0)
+        resistance_key = DAMAGE_TYPE_RESISTANCE.get(dmg_type)
+        if resistance_key is None:
+            yield event.plain_result(
+                f"异想体【{attacker_name}】的伤害类型【{dmg_type}】不受支持")
+            return
+        base_res = target.get(resistance_key, 1.0)
 
         # 等级差修正
         a_lv = LEVEL_WEIGHT.get(attacker["level"], 1)
@@ -999,7 +1209,7 @@ class LobFullEgoPlugin(Star):
 
         # 检查目标是否死亡
         if self.raid_status[target_name]["hp"] <= 0:
-            self.raid_status[target_name]["is_raid"] = False
+            self._contain_monster(target_name)
             msg += f"\n✅【{target_name}】血量归零，已被镇压！"
 
         self._save_all()
@@ -1027,9 +1237,12 @@ class LobFullEgoPlugin(Star):
             # 时效已过，伤害自动生效
             staff = self.staff_data.get(s_name)
             if staff:
-                staff["hp"] -= dodge_data["pending_dmg"]
+                staff["hp"] = max(
+                    0, staff.get("hp", 0) - dodge_data["pending_dmg"])
                 if staff["hp"] <= 0:
                     staff["is_dying"] = True
+                    staff["is_crazy"] = False
+                    staff["crazy_value"] = 0
                     self.dying_queue[s_name] = {
                         "expire": now + DYING_RESCUE_EXPIRE}
                 self._save_all()
@@ -1056,6 +1269,18 @@ class LobFullEgoPlugin(Star):
             yield event.plain_result(f"【{target}】不在濒死列表中")
             return
 
+        if target not in self.staff_data:
+            del self.dying_queue[target]
+            self._save_all()
+            yield event.plain_result(f"员工【{target}】数据不存在，已清理濒死记录")
+            return
+
+        if self.staff_data[target].get("is_dead", False):
+            del self.dying_queue[target]
+            self._save_all()
+            yield event.plain_result(f"【{target}】已经永久死亡，无法救援")
+            return
+
         now = time.time()
         expire_time = self.dying_queue[target]["expire"]
 
@@ -1074,6 +1299,8 @@ class LobFullEgoPlugin(Star):
         staff = self.staff_data[target]
         staff["is_dying"] = False
         staff["hp"] = 1.0
+        staff["is_crazy"] = False
+        staff["crazy_value"] = 0
         del self.dying_queue[target]
         self._save_all()
         yield event.plain_result(f"✅ 救援成功！【{target}】脱离濒死状态，当前生命值 1.0")
@@ -1131,12 +1358,19 @@ class LobFullEgoPlugin(Star):
     async def cmd_reduce_counter(self, event: AstrMessageEvent):
         """扣除异想体的逆卡巴拉计数器：.扣除计数器 异想体名 [数量]"""
         args = event.message_str.strip().split()
-        if len(args) < 2:
+        if len(args) not in (2, 3):
             yield event.plain_result("格式：.扣除计数器 异想体名 [数量]\n例：.扣除计数器 西里安\n例：.扣除计数器 西里安 2")
             return
 
         monster_name = args[1]
-        amount = int(args[2]) if len(args) > 2 else 1
+        try:
+            amount = int(args[2]) if len(args) == 3 else 1
+        except ValueError:
+            yield event.plain_result("数量必须是正整数")
+            return
+        if amount <= 0:
+            yield event.plain_result("数量必须是正整数")
+            return
 
         if monster_name not in self.monster_lib:
             yield event.plain_result(f"异想体【{monster_name}】不存在")
@@ -1171,12 +1405,19 @@ class LobFullEgoPlugin(Star):
     async def cmd_restore_counter(self, event: AstrMessageEvent):
         """恢复异想体的逆卡巴拉计数器：.恢复计数器 异想体名 [数量]"""
         args = event.message_str.strip().split()
-        if len(args) < 2:
+        if len(args) not in (2, 3):
             yield event.plain_result("格式：.恢复计数器 异想体名 [数量]\n例：.恢复计数器 西里安\n例：.恢复计数器 西里安 1")
             return
 
         monster_name = args[1]
-        amount = int(args[2]) if len(args) > 2 else 1
+        try:
+            amount = int(args[2]) if len(args) == 3 else 1
+        except ValueError:
+            yield event.plain_result("数量必须是正整数")
+            return
+        if amount <= 0:
+            yield event.plain_result("数量必须是正整数")
+            return
 
         if monster_name not in self.monster_lib:
             yield event.plain_result(f"异想体【{monster_name}】不存在")
@@ -1188,7 +1429,7 @@ class LobFullEgoPlugin(Star):
             yield event.plain_result(f"异想体【{monster_name}】没有逆卡巴拉计数器数据")
             return
 
-        old_value = monster["q_counter"]
+        old_value = monster.get("q_counter", monster["q_counter_max"])
         new_value = min(monster["q_counter_max"], old_value + amount)
         monster["q_counter"] = new_value
 

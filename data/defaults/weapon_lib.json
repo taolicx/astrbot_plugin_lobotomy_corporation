@@ -1,0 +1,272 @@
+{
+  "随便": {
+    "dmg_type": "精神",
+    "speed": "快",
+    "level": "WAW"
+  },
+  "三十三重离恨": {
+    "dmg_type": "侵蚀",
+    "speed": "极快",
+    "level": "WAW"
+  },
+  "悔恨": {
+    "dmg_type": "灵魂",
+    "speed": "一般",
+    "level": "HE"
+  },
+  "饼": {
+    "dmg_type": "红",
+    "speed": "快",
+    "level": "HE"
+  },
+  "镇暴棍": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "HE"
+  },
+  "窒息-2": {
+    "dmg_type": "精神",
+    "speed": "慢",
+    "level": "ALEPH"
+  },
+  "窒息-1": {
+    "dmg_type": "精神",
+    "speed": "极快",
+    "level": "ALEPH"
+  },
+  "窒息": {
+    "dmg_type": "精神",
+    "speed": "极快",
+    "level": "ALEPH"
+  },
+  "费尔切": {
+    "dmg_type": "物理",
+    "speed": "快",
+    "level": "WAW"
+  },
+  "束缚": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "HE"
+  },
+  "时间从不停留": {
+    "dmg_type": "蓝色",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "胎衣": {
+    "dmg_type": "侵蚀",
+    "speed": "快",
+    "level": "WAW"
+  },
+  "呕吐": {
+    "dmg_type": "蓝",
+    "speed": "快",
+    "level": "ALEPH"
+  },
+  "吞咽": {
+    "dmg_type": "白色",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "无言": {
+    "dmg_type": "侵蚀",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "禽兽": {
+    "dmg_type": "侵蚀",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "观测": {
+    "dmg_type": "侵蚀",
+    "speed": "快",
+    "level": "WAW"
+  },
+  "荣耀": {
+    "dmg_type": "物理",
+    "speed": "极快",
+    "level": "HE"
+  },
+  "岁岁红": {
+    "dmg_type": "勇气",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "为什么": {
+    "dmg_type": "精神",
+    "speed": "极快",
+    "level": "ALEPH"
+  },
+  "万变-1": {
+    "dmg_type": "灵魂",
+    "speed": "快",
+    "level": "ALEPH"
+  },
+  "万变-2": {
+    "dmg_type": "灵魂",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "沉沦": {
+    "dmg_type": "精神",
+    "speed": "慢",
+    "level": "ALEPH"
+  },
+  "误言": {
+    "dmg_type": "侵蚀",
+    "speed": "快",
+    "level": "ALEPH"
+  },
+  "未竟之美": {
+    "dmg_type": "侵蚀",
+    "speed": "快",
+    "level": "WAW"
+  },
+  "所谓不可侵犯": {
+    "dmg_type": "红色",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "番茄篮子": {
+    "dmg_type": "红色",
+    "speed": "快",
+    "level": "ALEPH"
+  },
+  "残萼": {
+    "dmg_type": "白",
+    "speed": "快",
+    "level": "WAW"
+  },
+  "鹰犬之劳": {
+    "dmg_type": "精神",
+    "speed": "慢",
+    "level": "ALEPH"
+  },
+  "灵感": {
+    "dmg_type": "灵魂伤害",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "皮特托先生": {
+    "dmg_type": "物理伤害",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "天宫织成": {
+    "dmg_type": "侵蚀伤害",
+    "speed": "极快",
+    "level": "WAW"
+  },
+  "死讯": {
+    "dmg_type": "精神",
+    "speed": "慢",
+    "level": "ALEPH"
+  },
+  "悼歌": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "HE"
+  },
+  "悖论": {
+    "dmg_type": "蓝",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "悖论2": {
+    "dmg_type": "红",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "悖论3": {
+    "dmg_type": "白",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "悖论4": {
+    "dmg_type": "黑",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "楔子": {
+    "dmg_type": "侵蚀",
+    "speed": "极快",
+    "level": "WAW"
+  },
+  "穹测箴言": {
+    "dmg_type": "精神",
+    "speed": "慢",
+    "level": "ALEPH"
+  },
+  "头奖!!": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "70.08％": {
+    "dmg_type": "侵蚀",
+    "speed": "一般",
+    "level": "HE"
+  },
+  "不应在此": {
+    "dmg_type": "灵魂",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "幼童": {
+    "dmg_type": "精神",
+    "speed": "慢",
+    "level": "WAW"
+  },
+  "痛楚": {
+    "dmg_type": "物理",
+    "speed": "快",
+    "level": "HE"
+  },
+  "悬命": {
+    "dmg_type": "物理",
+    "speed": "极快",
+    "level": "ALEPH"
+  },
+  "纷争1": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "纷争2": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "ALEPH"
+  },
+  "当你忽略期盼时": {
+    "dmg_type": "精神",
+    "speed": "极慢",
+    "level": "ALEPH"
+  },
+  "症结": {
+    "dmg_type": "物理",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "注视": {
+    "dmg_type": "侵蚀",
+    "speed": "快",
+    "level": "ALEPH"
+  },
+  "菌丝": {
+    "dmg_type": "侵蚀",
+    "speed": "一般",
+    "level": "WAW"
+  },
+  "残阳": {
+    "dmg_type": "侵蚀",
+    "speed": "慢",
+    "level": "ALEPH"
+  },
+  "残阳2": {
+    "dmg_type": "灵魂",
+    "speed": "一般",
+    "level": "ALEPH"
+  }
+}

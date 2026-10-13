@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Legacy mutable state files are migrated to AstrBot plugin_data on startup
+/data/*.json
